@@ -9,7 +9,7 @@ app = FastAPI(
 @app.get("/")
 def home() -> dict[str, str]:
     return {
-        "message": "FastAPI Docker Actions application version 1"
+        "message": "FastAPI Docker Actions application version 1234"
     }
 
 
