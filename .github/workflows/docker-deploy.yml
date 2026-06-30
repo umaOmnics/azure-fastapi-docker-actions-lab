@@ -1,0 +1,109 @@
+name: Build and Deploy Docker Image to Azure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "main.py"
+      - "requirements.txt"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/docker-deploy.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fastapi-docker-production
+  cancel-in-progress: true
+
+jobs:
+  build-test-deploy:
+    name: Build, Test, Push and Deploy
+    runs-on: ubuntu-latest
+
+    env:
+      REGISTRY: ${{ secrets.ACR_LOGIN_SERVER }}
+      IMAGE_NAME: fastapi-docker-actions
+      IMAGE_TAG: ${{ github.sha }}
+      WEBAPP_NAME: asp-fastapi-docker-actions-lab
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --tag "$REGISTRY/$IMAGE_NAME:$IMAGE_TAG" \
+            --tag "$REGISTRY/$IMAGE_NAME:latest" \
+            .
+
+      - name: Start container for testing
+        run: |
+          docker run \
+            --detach \
+            --name fastapi-test-container \
+            --publish 8000:8000 \
+            "$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+
+      - name: Test health endpoint
+        run: |
+          for attempt in {1..20}; do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              http://127.0.0.1:8000/health; then
+
+              echo
+              echo "Container health check succeeded."
+              exit 0
+            fi
+
+            echo "Waiting for container: attempt $attempt of 20"
+            sleep 2
+          done
+
+          echo "Container failed its health check."
+          docker logs fastapi-test-container
+          exit 1
+
+      - name: Remove test container
+        if: always()
+        run: |
+          docker rm \
+            --force \
+            fastapi-test-container 2>/dev/null || true
+
+      - name: Push commit image to ACR
+        run: |
+          docker push "$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+
+      - name: Push latest image to ACR
+        run: |
+          docker push "$REGISTRY/$IMAGE_NAME:latest"
+
+      - name: Deploy image to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+      - name: Deployment summary
+        run: |
+          echo "Deployment completed."
+          echo "Web App: $WEBAPP_NAME"
+          echo "Image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
